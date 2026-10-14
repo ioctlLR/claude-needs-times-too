@@ -1,0 +1,5 @@
+{
+  "name": "claude-needs-times-too",
+  "owner": { "name": "ioctlLR" },
+  "plugins": [{ "name": "date-time", "source": "./" }]
+}
