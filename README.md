@@ -4,10 +4,12 @@ Claude Code gets a date, but not a time. This mod fixes that, a little cheekily.
 
 When timestamps are on:
 
-- every tool result ends with `[tool result recorded at HH:MM:SS ±HH:MM]`
-- every user prompt is followed by a hidden `<system-reminder>` saying `The time is HH:MM:SS ±HH:MM.`
+- every tool result ends with `[tool result recorded at HH:MM:SS]`
+- every user prompt is followed by a hidden `<system-reminder>` saying `The time is HH:MM:SS.`
 
-Both come from the same local clock. They are off by default, so a session that doesn't need
+Both come from the same local clock. The first stamp after switching on, or after a compaction, is full,
+`2026-10-19 14:05:09 -05:00`; after that the date appears only when the local date changes (past
+midnight) and the offset only when it changes (DST, or a new system time zone). They are off by default, so a session that doesn't need
 the time pays nothing for it.
 
 ## Switching

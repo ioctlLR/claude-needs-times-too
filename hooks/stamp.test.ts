@@ -1,5 +1,5 @@
 import { test, expect } from 'claude-code/testing'
-import { stampBlock, formatTime, trailer, offTrailer, parseSwitch, promptReminder, hasText } from './stamp'
+import { stampBlock, formatStamp, trailer, offTrailer, parseSwitch, promptReminder, hasText } from './stamp'
 
 const T = '10:00:00 +00:00'
 
@@ -13,8 +13,14 @@ test('stamps string and block-array tool results once', () => {
   expect(stampBlock({ type: 'text', text: 'hi' }, trailer(T))).toEqual({ type: 'text', text: 'hi' })
 })
 
-test('formats offset', () => {
-  expect(formatTime(0)).toMatch(/^\d\d:\d\d:\d\d [+-]\d\d:\d\d$/)
+test('shows date and offset first, then only when they change', () => {
+  const noon = new Date(2026, 9, 19, 12).getTime()
+  const first = formatStamp(noon)
+  expect(first.text).toMatch(/^2026-10-19 12:00:00 [+-]\d\d:\d\d$/)
+  expect(formatStamp(noon + 1000, first.shown).text).toBe('12:00:01')
+  expect(formatStamp(new Date(2026, 9, 20, 0, 0, 5).getTime(), first.shown).text).toBe('2026-10-20 00:00:05')
+  const moved = formatStamp(noon, { ...first.shown, offset: '+99:00' })
+  expect(moved.text).toBe(`12:00:00 ${first.shown.offset}`)
 })
 
 test('prompt reminder and switch parsing', () => {

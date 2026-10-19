@@ -1,12 +1,21 @@
 import type { EngineInterface, Register } from 'claude-code'
 import {
-  NOTE, OFF_TEXT, TOOL, formatTime, hasText, offTrailer, parseSwitch, promptReminder, reminder, stampBlock, trailer,
+  NOTE, OFF_TEXT, TOOL, formatStamp, hasText, offTrailer, parseSwitch, promptReminder, reminder, stampBlock, trailer,
 } from './stamp'
 
 const REF = { plugin: 'date-time', key: 'timestamps' } as const
 
 async function read($: EngineInterface) {
   return (await $.state.get(REF)).value ?? { isOn: false, isOffPending: false }
+}
+
+/** The current time for a stamp in one conversation, recording the date and offset it shows. */
+async function stamp($: EngineInterface, agentId: string | undefined) {
+  const s = await read($)
+  const key = agentId ?? ''
+  const { text, shown } = formatStamp(await $.clock.now(), s.shown?.[key])
+  await $.state.set(REF, { ...s, shown: { ...s.shown, [key]: shown } })
+  return text
 }
 
 // Whether timestamps were on when each tool call started, by tool_use_id: a toggle
@@ -56,7 +65,7 @@ export const register: Register = on => {
     const lineFor = async (id: unknown) => {
       const wasOn = typeof id === 'string' ? startedOn.get(id) ?? s.isOn : s.isOn
       if (typeof id === 'string') startedOn.delete(id)
-      if (wasOn) return (line ??= trailer(formatTime(await $.clock.now())))
+      if (wasOn) return (line ??= trailer(await stamp($, e.agentId)))
       if (s.isOffPending && !s.isOn) return offTrailer
       return null
     }
@@ -76,7 +85,7 @@ export const register: Register = on => {
     if (!hasText(e.message.content)) return stored
     const s = await read($)
     let text: string | null = null
-    if (s.isOn) text = promptReminder(formatTime(await $.clock.now()))
+    if (s.isOn) text = promptReminder(await stamp($, e.agentId))
     else if (s.isOffPending) {
       text = reminder(OFF_TEXT)
       await $.state.set(REF, { isOn: false, isOffPending: false })
@@ -86,6 +95,19 @@ export const register: Register = on => {
     }
     return stored
   }).catch(($, e, next) => next(e))
+
+  // A summary may drop the last full stamp, so the next stamp after a compaction is full.
+  // No .catch: retrying next(e) would compact twice.
+  on('session.compact', async ($, e, next) => {
+    const r = await next(e)
+    if (r.skip !== undefined || e.trigger === 'precompute') return r
+    try {
+      const s = await read($)
+      const { [e.agentId ?? '']: _, ...shown } = s.shown ?? {}
+      await $.state.set(REF, { ...s, shown })
+    } catch {}
+    return r
+  })
 
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)

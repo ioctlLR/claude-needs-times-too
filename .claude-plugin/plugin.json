@@ -1,6 +1,6 @@
 {
   "name": "date-time",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Optional timestamps on user prompts and tool results, switched by the model or the person.",
   "types": "./types/index.d.ts"
 }
