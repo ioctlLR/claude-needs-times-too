@@ -1,7 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import {
-  NOTE, OFF_TEXT, TOOL, formatStamp, hasText, offTrailer, parseSwitch, promptReminder, reminder, stampBlock, trailer,
-} from './stamp'
+import { NOTE, OFF_TEXT, TOOL, formatStamp, hasText, parseSwitch, reminder, timeReminder } from './stamp'
 
 const REF = { plugin: 'date-time', key: 'timestamps' } as const
 
@@ -18,16 +16,37 @@ async function stamp($: EngineInterface, agentId: string | undefined) {
   return text
 }
 
-// Whether timestamps were on when each tool call started, by tool_use_id: a toggle
-// made mid-batch then changes only calls that start after it.
-const startedOn = new Map<string, boolean>()
+/** Appends the time, or the one-time off notice, as a hidden row the model reads. */
+async function remind($: EngineInterface, agentId: string | undefined) {
+  const s = await read($)
+  let text: string | null = null
+  if (s.isOn) text = timeReminder(await stamp($, agentId))
+  else if (s.isOffPending) {
+    text = reminder(OFF_TEXT)
+    await $.state.set(REF, { isOn: false, isOffPending: false })
+  }
+  if (text !== null) await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] }, agentId })
+}
+
+// The tool calls of each conversation's latest model response, by agentId ('' for main).
+// The reminder goes after the batch's last result, never between two: the API wants a
+// request's tool_result blocks before any text, and consecutive user rows are merged.
+type Batch = { ids: Set<string>; done: Set<string>; isStreamed: boolean; isReminded: boolean }
+const batches = new Map<string, Batch>()
+
+async function settle($: EngineInterface, agentId: string | undefined, b: Batch) {
+  if (!b.isStreamed || b.isReminded || b.ids.size === 0) return
+  for (const id of b.ids) if (!b.done.has(id)) return
+  b.isReminded = true
+  await remind($, agentId)
+}
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.tool.register({
       name: TOOL,
       description:
-        'Turn harness timestamps on or off. When on, each tool result ends with its local time and each user prompt is followed by the current time. Off by default; turn on when the time matters, off when it does not.',
+        'Turn harness timestamps on or off. When on, the current local time follows each user prompt and each batch of tool results. Off by default; turn on when the time matters, off when it does not.',
       inputSchema: {
         type: 'object',
         properties: { enabled: { type: 'boolean', description: 'true to add timestamps, false to stop' } },
@@ -42,14 +61,8 @@ export const register: Register = on => {
   on('tool.call', { tool: 'mcp__date-time__timestamps' }, async ($, e) => {
     const isOn = (e as unknown as { enabled?: unknown }).enabled === true
     await $.state.set(REF, { isOn, isOffPending: false })
-    startedOn.set(e.tool_use_id, isOn)
     return { result: isOn ? 'Timestamps are on.' : OFF_TEXT }
   })
-
-  on('tool.call', async ($, e, next) => {
-    if (e.tool !== 'mcp__date-time__timestamps') startedOn.set(e.tool_use_id, (await read($)).isOn)
-    return next(e)
-  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'timestamps' }, async ($, e) => {
     const cur = await read($)
@@ -59,42 +72,41 @@ export const register: Register = on => {
     return { text: `Timestamps ${isOn ? 'on' : 'off'}.` }
   })
 
+  // Collects the response's tool call ids as they stream. Results can be stored before
+  // the stream ends, so whichever of the two comes last appends the reminder.
+  on('turn.step', async function* ($, e, next) {
+    const b: Batch = { ids: new Set(), done: new Set(), isStreamed: false, isReminded: false }
+    batches.set(e.agentId ?? '', b)
+    for await (const c of next(e)) {
+      if (c.kind === 'tool') b.ids.add(c.id)
+      yield c
+    }
+    b.isStreamed = true
+    try {
+      await settle($, e.agentId, b)
+    } catch {}
+  })
+
+  // No .catch here or on the prompt door: retrying next(e) would store the row twice.
   on('session.append', { door: 'tool-result' }, async ($, e, next) => {
-    const s = await read($)
-    let line: string | null = null
-    const lineFor = async (id: unknown) => {
-      const wasOn = typeof id === 'string' ? startedOn.get(id) ?? s.isOn : s.isOn
-      if (typeof id === 'string') startedOn.delete(id)
-      if (wasOn) return (line ??= trailer(await stamp($, e.agentId)))
-      if (s.isOffPending && !s.isOn) return offTrailer
-      return null
-    }
-    let isNoticeUsed = false
-    const content = []
-    for (const b of e.message.content) {
-      const l = b.type === 'tool_result' ? await lineFor(b.tool_use_id) : null
-      if (l === offTrailer) isNoticeUsed = true
-      content.push(l === null ? b : stampBlock(b, l))
-    }
-    if (isNoticeUsed) await $.state.set(REF, { isOn: false, isOffPending: false })
-    return next({ ...e, message: { ...e.message, content } })
-  }).catch(($, e, next) => next(e))
+    const stored = await next(e)
+    try {
+      const b = batches.get(e.agentId ?? '')
+      if (b) {
+        for (const c of e.message.content) if (c.type === 'tool_result' && typeof c.tool_use_id === 'string') b.done.add(c.tool_use_id)
+        await settle($, e.agentId, b)
+      }
+    } catch {}
+    return stored
+  })
 
   on('session.append', { door: 'prompt' }, async ($, e, next) => {
     const stored = await next(e)
-    if (!hasText(e.message.content)) return stored
-    const s = await read($)
-    let text: string | null = null
-    if (s.isOn) text = promptReminder(await stamp($, e.agentId))
-    else if (s.isOffPending) {
-      text = reminder(OFF_TEXT)
-      await $.state.set(REF, { isOn: false, isOffPending: false })
-    }
-    if (text !== null) {
-      await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] }, agentId: e.agentId })
-    }
+    try {
+      if (hasText(e.message.content)) await remind($, e.agentId)
+    } catch {}
     return stored
-  }).catch(($, e, next) => next(e))
+  })
 
   // A summary may drop the last full stamp, so the next stamp after a compaction is full.
   // No .catch: retrying next(e) would compact twice.
